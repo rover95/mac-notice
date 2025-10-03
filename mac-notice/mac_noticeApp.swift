@@ -5,7 +5,7 @@ struct mac_noticeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .frame(minWidth: 320, minHeight: 260)
+                .frame(minWidth: 200, minHeight: 200)
         }
         .defaultSize(width: 480, height: 360)
         .windowStyle(.hiddenTitleBar)

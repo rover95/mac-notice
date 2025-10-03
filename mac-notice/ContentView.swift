@@ -9,6 +9,9 @@ struct ContentView: View {
     @State private var expandedFrame: NSRect?
     @State private var hasConfiguredWindow = false
     @State private var collapsedDragOffset: NSPoint?
+    @State private var collapsedExpansionOffset: NSPoint?
+
+    private let expandedMinimumSize = CGSize(width: 200, height: 200)
 
     var body: some View {
         ZStack {
@@ -25,10 +28,10 @@ struct ContentView: View {
         .clipShape(currentSurfaceShape)
         .contentShape(currentSurfaceShape)
         .frame(
-            minWidth: isCollapsed ? 56 : 360,
+            minWidth: isCollapsed ? 56 : expandedMinimumSize.width,
             idealWidth: isCollapsed ? 72 : 440,
             maxWidth: isCollapsed ? 120 : 680,
-            minHeight: isCollapsed ? 56 : 260,
+            minHeight: isCollapsed ? 56 : expandedMinimumSize.height,
             idealHeight: isCollapsed ? 72 : 500,
             maxHeight: .infinity
         )
@@ -47,6 +50,7 @@ struct ContentView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isCollapsed)
         .animation(.easeInOut(duration: 0.2), value: isPinned)
         .ignoresSafeArea()
+        .environment(\.controlActiveState, .active)
     }
 
     private var expandedBoard: some View {
@@ -71,7 +75,7 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 320, minHeight: 240)
+        .frame(minWidth: 160, minHeight: 160)
     }
 
     private var headerControls: some View {
@@ -92,12 +96,16 @@ struct ContentView: View {
     private var collapsedBubble: some View {
         Group {
             if #available(macOS 26.0, *) {
-                LiquidGlassCollapsedBubble(action: toggleCollapse)
+                LiquidGlassCollapsedBubble()
             } else {
-                LegacyCollapsedBubble(action: toggleCollapse)
+                LegacyCollapsedBubble()
             }
         }
-        .simultaneousGesture(collapsedDragGesture)
+        .contentShape(Circle())
+        .onTapGesture(perform: toggleCollapse)
+        .highPriorityGesture(collapsedDragGesture, including: .gesture)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("展开公告板")
     }
 
     private func togglePin() {
@@ -144,6 +152,15 @@ struct ContentView: View {
             var targetOrigin = window.frame.origin
             targetOrigin.y += window.frame.size.height - bubbleSize.height
 
+            if let expandedFrame {
+                collapsedExpansionOffset = NSPoint(
+                    x: expandedFrame.origin.x - targetOrigin.x,
+                    y: expandedFrame.origin.y - targetOrigin.y
+                )
+            } else {
+                collapsedExpansionOffset = nil
+            }
+
             window.minSize = bubbleSize
             window.isMovableByWindowBackground = false
 
@@ -152,18 +169,31 @@ struct ContentView: View {
                 window.animator().setFrame(NSRect(origin: targetOrigin, size: bubbleSize), display: true)
             }
         } else {
-            let minimumExpandedSize = NSSize(width: 360, height: 280)
-            window.minSize = minimumExpandedSize
+            window.minSize = NSSize(width: expandedMinimumSize.width, height: expandedMinimumSize.height)
             window.isMovableByWindowBackground = true
 
-            guard let expandedFrame else { return }
+            guard let storedExpandedFrame = expandedFrame else { return }
+
+            let targetOrigin: NSPoint
+            if let offset = collapsedExpansionOffset {
+                let bubbleOrigin = window.frame.origin
+                targetOrigin = NSPoint(
+                    x: bubbleOrigin.x + offset.x,
+                    y: bubbleOrigin.y + offset.y
+                )
+            } else {
+                targetOrigin = storedExpandedFrame.origin
+            }
+
+            let targetFrame = NSRect(origin: targetOrigin, size: storedExpandedFrame.size)
 
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = animationDuration
-                window.animator().setFrame(expandedFrame, display: true)
+                window.animator().setFrame(targetFrame, display: true)
             }
 
             self.expandedFrame = nil
+            self.collapsedExpansionOffset = nil
         }
     }
 
@@ -181,7 +211,7 @@ struct ContentView: View {
         window.styleMask = [.borderless, .resizable]
         window.invalidateShadow()
         window.setFrameAutosaveName("NoticeBoardWindow")
-        window.minSize = NSSize(width: 360, height: 280)
+        window.minSize = NSSize(width: expandedMinimumSize.width, height: expandedMinimumSize.height)
     }
 
     private var collapsedDragGesture: some Gesture {
@@ -278,19 +308,14 @@ private struct LiquidGlassShapeModifier: ViewModifier {
 
 @available(macOS 26.0, *)
 private struct LiquidGlassCollapsedBubble: View {
-    let action: () -> Void
-
     var body: some View {
         GlassEffectContainer {
-            Button(action: action) {
-                Image(systemName: "bubble.left.and.bubble.right.fill")
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
-                    .frame(width: 36, height: 36)
-            }
-            .buttonStyle(.plain)
-            .padding(6)
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
+                .frame(width: 36, height: 36)
+                .padding(6)
         }
         .glassEffect(
             .clear
@@ -303,31 +328,38 @@ private struct LiquidGlassCollapsedBubble: View {
 }
 
 private struct LegacyCollapsedBubble: View {
-    let action: () -> Void
-
     var body: some View {
-        Button(action: action) {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
-                .frame(width: 36, height: 36)
-        }
-        .buttonStyle(.plain)
-        .padding(6)
-        .contentShape(Circle())
+        Image(systemName: "bubble.left.and.bubble.right.fill")
+            .font(.system(size: 24, weight: .semibold, design: .rounded))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
+            .frame(width: 36, height: 36)
+            .padding(6)
+            .contentShape(Circle())
     }
 }
 
 @available(macOS 26.0, *)
 private struct LiquidGlassEditorBackground: View {
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+
         GlassEffectContainer {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
-                .blendMode(.overlay)
+            ZStack {
+                shape
+                    .fill(Color.black.opacity(0.12))
+                    .blendMode(.plusLighter)
+
+                shape
+                    .strokeBorder(Color.black.opacity(0.18), lineWidth: 0.9)
+                    .blendMode(.overlay)
+            }
         }
-        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .glassEffect(
+            .clear
+                .tint(Color.black.opacity(0.1)),
+            in: shape
+        )
     }
 }
 

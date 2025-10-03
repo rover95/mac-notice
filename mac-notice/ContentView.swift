@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var window: NSWindow?
     @State private var expandedFrame: NSRect?
     @State private var hasConfiguredWindow = false
+    @State private var collapsedDragOffset: NSPoint?
 
     var body: some View {
         ZStack {
@@ -17,13 +18,9 @@ struct ContentView: View {
                 expandedBoard
             }
         }
-        .padding(isCollapsed ? 0 : 24)
+        .padding(isCollapsed ? 0 : 18)
         .background {
-            if isCollapsed {
-                LiquidGlassBubbleBackground()
-            } else {
-                LiquidGlassPanelBackground(cornerRadius: 36)
-            }
+            surfaceBackground
         }
         .clipShape(currentSurfaceShape)
         .contentShape(currentSurfaceShape)
@@ -69,18 +66,7 @@ struct ContentView: View {
                     .foregroundStyle(.primary)
                     .padding(8)
                     .scrollContentBackground(.hidden)
-                    .background {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(.ultraThinMaterial.opacity(0.65))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                    .stroke(
-                                        LinearGradient(colors: [.white.opacity(0.25), .white.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                                        lineWidth: 1
-                                    )
-                                    .blendMode(.overlay)
-                            }
-                    }
+                    .background(editorBackground)
                     .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -89,41 +75,29 @@ struct ContentView: View {
     }
 
     private var headerControls: some View {
-        HStack(spacing: 18) {
-            HStack(spacing: 12) {
-                CloseButton(action: closeWindow)
+        HStack(spacing: 12) {
+            CloseButton(action: closeWindow)
 
-                ControlButton(systemName: "pin", isActive: isPinned, action: togglePin)
-                    .help(isPinned ? "取消图钉" : "图钉置顶")
-            }
-
-            Spacer(minLength: 12)
-
-            Text("公告栏")
-                .font(.system(.title3, design: .rounded).weight(.semibold))
-                .foregroundStyle(.white.opacity(0.96))
-                .padding(.horizontal, 18)
-                .padding(.vertical, 8)
-                .background(GlassCapsule())
+            ControlButton(systemName: "pin", isActive: isPinned, action: togglePin)
+                .help(isPinned ? "取消图钉" : "图钉置顶")
 
             Spacer(minLength: 12)
 
             ControlButton(systemName: "bubble.left.and.bubble.right", isActive: isCollapsed, action: toggleCollapse)
                 .help("收起为气泡")
         }
+        .padding(.top, 2)
     }
 
     private var collapsedBubble: some View {
-        Button(action: toggleCollapse) {
-            Image(systemName: "megaphone.fill")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
-                .frame(width: 36, height: 36)
+        Group {
+            if #available(macOS 26.0, *) {
+                LiquidGlassCollapsedBubble(action: toggleCollapse)
+            } else {
+                LegacyCollapsedBubble(action: toggleCollapse)
+            }
         }
-        .buttonStyle(.plain)
-        .padding(6)
-        .contentShape(Circle())
+        .simultaneousGesture(collapsedDragGesture)
     }
 
     private func togglePin() {
@@ -138,15 +112,22 @@ struct ContentView: View {
 
     private func closeWindow() {
         if let window {
-            window.performClose(nil)
-        } else {
-            NSApp.terminate(nil)
+            window.close()
         }
+        NSApp.terminate(nil)
     }
 
     private func updateWindowLevel() {
         guard let window else { return }
         window.level = isPinned ? .floating : .normal
+
+        if isPinned {
+            window.collectionBehavior.insert([.canJoinAllSpaces, .fullScreenAuxiliary, .stationary])
+        } else {
+            window.collectionBehavior.remove(.canJoinAllSpaces)
+            window.collectionBehavior.remove(.fullScreenAuxiliary)
+            window.collectionBehavior.remove(.stationary)
+        }
     }
 
     private func applyCollapseState(_ collapsed: Bool, animated: Bool = true) {
@@ -164,6 +145,7 @@ struct ContentView: View {
             targetOrigin.y += window.frame.size.height - bubbleSize.height
 
             window.minSize = bubbleSize
+            window.isMovableByWindowBackground = false
 
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = animationDuration
@@ -172,6 +154,7 @@ struct ContentView: View {
         } else {
             let minimumExpandedSize = NSSize(width: 360, height: 280)
             window.minSize = minimumExpandedSize
+            window.isMovableByWindowBackground = true
 
             guard let expandedFrame else { return }
 
@@ -201,12 +184,166 @@ struct ContentView: View {
         window.minSize = NSSize(width: 360, height: 280)
     }
 
+    private var collapsedDragGesture: some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                guard let window else { return }
+                let mouse = NSEvent.mouseLocation
+
+                if collapsedDragOffset == nil {
+                    collapsedDragOffset = NSPoint(
+                        x: mouse.x - window.frame.origin.x,
+                        y: mouse.y - window.frame.origin.y
+                    )
+                }
+
+                guard let offset = collapsedDragOffset else { return }
+
+                let newOrigin = NSPoint(
+                    x: mouse.x - offset.x,
+                    y: mouse.y - offset.y
+                )
+
+                window.setFrameOrigin(newOrigin)
+            }
+            .onEnded { _ in
+                collapsedDragOffset = nil
+            }
+    }
+
     private var currentSurfaceShape: AnyShape {
         if isCollapsed {
             return AnyShape(Circle())
         } else {
-            return AnyShape(RoundedRectangle(cornerRadius: 36, style: .continuous))
+            return AnyShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         }
+    }
+
+    @ViewBuilder
+    private var surfaceBackground: some View {
+        if #available(macOS 26.0, *) {
+            LiquidGlassSurface(isCollapsed: isCollapsed)
+        } else {
+            if isCollapsed {
+                FrostedBubbleBackground()
+            } else {
+                FrostedPanelBackground(cornerRadius: 28)
+            }
+        }
+    }
+}
+
+@ViewBuilder
+private var editorBackground: some View {
+    if #available(macOS 26.0, *) {
+        LiquidGlassEditorBackground()
+    } else {
+        LegacyEditorBackground()
+    }
+}
+
+@available(macOS 26.0, *)
+private struct LiquidGlassSurface: View {
+    let isCollapsed: Bool
+
+    var body: some View {
+        GlassEffectContainer {
+            Color.clear
+        }
+        .modifier(LiquidGlassShapeModifier(isCollapsed: isCollapsed))
+    }
+}
+
+@available(macOS 26.0, *)
+private struct LiquidGlassShapeModifier: ViewModifier {
+    let isCollapsed: Bool
+
+    func body(content: Content) -> some View {
+        if isCollapsed {
+            content
+                .glassEffect(
+                    .clear
+                        .interactive(),
+                    in: Circle()
+                )
+        } else {
+            content
+                .glassEffect(
+                    .clear,
+                    in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+                )
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+private struct LiquidGlassCollapsedBubble: View {
+    let action: () -> Void
+
+    var body: some View {
+        GlassEffectContainer {
+            Button(action: action) {
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
+                    .frame(width: 36, height: 36)
+            }
+            .buttonStyle(.plain)
+            .padding(6)
+        }
+        .glassEffect(
+            .clear
+                .interactive(),
+            in: Circle()
+        )
+        .frame(width: 56, height: 56)
+        .contentShape(Circle())
+    }
+}
+
+private struct LegacyCollapsedBubble: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
+                .frame(width: 36, height: 36)
+        }
+        .buttonStyle(.plain)
+        .padding(6)
+        .contentShape(Circle())
+    }
+}
+
+@available(macOS 26.0, *)
+private struct LiquidGlassEditorBackground: View {
+    var body: some View {
+        GlassEffectContainer {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
+                .blendMode(.overlay)
+        }
+        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+private struct LegacyEditorBackground: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .fill(Color.white.opacity(0.08))
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(
+                        LinearGradient(colors: [.white.opacity(0.25), .white.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                        lineWidth: 1
+                    )
+                    .blendMode(.overlay)
+            }
     }
 }
 
@@ -220,9 +357,19 @@ private struct ControlButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .symbolVariant(isActive ? .fill : .none)
-                .foregroundStyle(isActive ? Color.white.opacity(0.95) : Color.white.opacity(0.82))
-                .frame(width: 36, height: 36)
-                .background(GlassOrb(tint: isActive ? Color.accentColor : Color.white.opacity(0.12)))
+                .foregroundStyle(isActive ? Color.white.opacity(0.98) : Color.white.opacity(0.82))
+                .frame(width: 32, height: 32)
+                .background {
+                    Circle()
+                        .fill(Color.white.opacity(isActive ? 0.22 : 0.12))
+                        .background(.regularMaterial, in: Circle())
+                        .overlay {
+                            Circle()
+                                .stroke(Color.white.opacity(0.25), lineWidth: 0.8)
+                                .blendMode(.overlay)
+                        }
+                        .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+                }
         }
         .buttonStyle(.plain)
     }
@@ -237,183 +384,57 @@ private struct CloseButton: View {
                 .font(.system(size: 14, weight: .bold, design: .rounded))
                 .foregroundStyle(Color.white.opacity(0.94))
                 .frame(width: 32, height: 32)
-                .background(GlassOrb(tint: Color.red.opacity(0.65)))
+                .background {
+                    Circle()
+                        .fill(Color.red.opacity(0.24))
+                        .background(.regularMaterial, in: Circle())
+                        .overlay {
+                            Circle()
+                                .stroke(Color.white.opacity(0.28), lineWidth: 0.9)
+                                .blendMode(.overlay)
+                        }
+                        .shadow(color: Color.red.opacity(0.24), radius: 8, y: 3)
+                }
         }
         .buttonStyle(.plain)
         .help("关闭公告栏")
     }
 }
 
-private struct GlassCapsule: View {
-    var body: some View {
-        Capsule(style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.24),
-                        Color.white.opacity(0.05)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .background(.ultraThinMaterial.opacity(0.78), in: Capsule(style: .continuous))
-            .overlay {
-                Capsule(style: .continuous)
-                    .stroke(LinearGradient(colors: [.white.opacity(0.7), .white.opacity(0.18)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.1)
-                    .blendMode(.overlay)
-            }
-            .shadow(color: .white.opacity(0.25), radius: 10, y: -2)
-            .shadow(color: .black.opacity(0.18), radius: 14, y: 8)
-    }
-}
-
-private struct GlassOrb: View {
-    let tint: Color
-
-    var body: some View {
-        Circle()
-            .fill(tint.opacity(0.5))
-            .background(.ultraThinMaterial.opacity(0.82), in: Circle())
-            .overlay {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                Color.white.opacity(0.55),
-                                Color.white.opacity(0.08)
-                            ],
-                            center: .topLeading,
-                            startRadius: 4,
-                            endRadius: 48
-                        )
-                    )
-                    .blendMode(.screen)
-                    .opacity(0.9)
-            }
-            .overlay {
-                Circle()
-                    .stroke(LinearGradient(colors: [.white.opacity(0.75), .white.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.1)
-                    .blendMode(.overlay)
-            }
-            .shadow(color: tint.opacity(0.55), radius: 16, y: 8)
-    }
-}
-
-private struct LiquidGlassPanelBackground: View {
+private struct FrostedPanelBackground: View {
     let cornerRadius: CGFloat
 
-    init(cornerRadius: CGFloat = 36) {
-        self.cornerRadius = cornerRadius
-    }
-
     var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(Color.white.opacity(0.04))
-            .background(.ultraThinMaterial.opacity(0.92), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        shape
+            .fill(Color.white.opacity(0.08))
+            .background(.regularMaterial, in: shape)
             .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius + 10, style: .continuous)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 12)
-                    .blur(radius: 20)
-                    .opacity(0.8)
-                    .blendMode(.screen)
-                    .padding(-18)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(LinearGradient(colors: [.white.opacity(0.8), .white.opacity(0.18)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.4)
+                shape
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
                     .blendMode(.overlay)
             }
-            .overlay(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                Color.white.opacity(0.6),
-                                Color.white.opacity(0.05)
-                            ],
-                            center: .topLeading,
-                            startRadius: 4,
-                            endRadius: 180
-                        )
-                    )
-                    .blendMode(.screen)
-                    .opacity(0.75)
-                    .mask(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    )
-            }
-            .overlay(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.cyan.opacity(0.24),
-                                Color.purple.opacity(0.12),
-                                Color.clear
-                            ],
-                            startPoint: .bottomTrailing,
-                            endPoint: .topLeading
-                        )
-                    )
-                    .blendMode(.plusLighter)
-                    .opacity(0.6)
-                    .mask(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    )
-            }
-            .shadow(color: .black.opacity(0.28), radius: 36, y: 30)
-            .shadow(color: .cyan.opacity(0.22), radius: 28, y: 12)
+            .shadow(color: .black.opacity(0.22), radius: 26, y: 18)
+            .shadow(color: Color.white.opacity(0.12), radius: 10, y: -6)
     }
 }
 
-private struct LiquidGlassBubbleBackground: View {
+private struct FrostedBubbleBackground: View {
     var body: some View {
         Circle()
-            .fill(Color.white.opacity(0.08))
-            .background(.ultraThinMaterial.opacity(0.95), in: Circle())
-            .overlay(alignment: .topLeading) {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                Color.white.opacity(0.85),
-                                Color.white.opacity(0.1)
-                            ],
-                            center: .topLeading,
-                            startRadius: 6,
-                            endRadius: 80
-                        )
-                    )
-                    .blur(radius: 2)
-                    .blendMode(.screen)
-                    .opacity(0.8)
-            }
+            .fill(Color.white.opacity(0.12))
+            .background(.regularMaterial, in: Circle())
             .overlay {
                 Circle()
-                    .stroke(LinearGradient(colors: [.white.opacity(0.9), .white.opacity(0.25)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1.6)
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
                     .blendMode(.overlay)
             }
-            .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.cyan.opacity(0.35),
-                                Color.purple.opacity(0.15),
-                                Color.clear
-                            ],
-                            startPoint: .bottomTrailing,
-                            endPoint: .topLeading
-                        )
-                    )
-                    .blendMode(.plusLighter)
-                    .opacity(0.55)
-            }
-            .shadow(color: .black.opacity(0.3), radius: 32, y: 24)
-            .shadow(color: .cyan.opacity(0.25), radius: 26, y: 8)
+            .shadow(color: .black.opacity(0.24), radius: 16, y: 12)
+            .shadow(color: Color.white.opacity(0.12), radius: 6, y: -4)
     }
 }
+
 
 private struct AnyShape: Shape {
     private let pathClosure: (CGRect) -> Path

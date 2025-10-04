@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 struct ContentView: View {
     @AppStorage("noticeText") private var noticeText = ""
@@ -10,6 +11,7 @@ struct ContentView: View {
     @State private var hasConfiguredWindow = false
     @State private var collapsedDragOffset: NSPoint?
     @State private var collapsedExpansionOffset: NSPoint?
+    @State private var pinnedFrame: NSRect?
 
     private let expandedMinimumSize = CGSize(width: 200, height: 200)
 
@@ -47,6 +49,20 @@ struct ContentView: View {
         .onChange(of: isCollapsed) { collapsed in
             applyCollapseState(collapsed)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMoveNotification)) { notification in
+            guard isPinned,
+                  let window,
+                  let movedWindow = notification.object as? NSWindow,
+                  movedWindow == window else { return }
+            pinnedFrame = window.frame
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { notification in
+            guard isPinned,
+                  let window,
+                  let resizedWindow = notification.object as? NSWindow,
+                  resizedWindow == window else { return }
+            pinnedFrame = window.frame
+        }
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isCollapsed)
         .animation(.easeInOut(duration: 0.2), value: isPinned)
         .ignoresSafeArea()
@@ -57,23 +73,24 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             headerControls
 
-            ZStack(alignment: .topLeading) {
-                if noticeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("粘贴或输入公告…")
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 10)
-                        .padding(.horizontal, 14)
+            TextEditor(text: $noticeText)
+                .font(.system(.body, design: .rounded))
+                .foregroundStyle(.primary)
+                .padding(8)
+                .scrollContentBackground(.hidden)
+                .background(editorBackground)
+                .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
+                .overlay(alignment: .topLeading) {
+                    if noticeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("粘贴或输入公告…")
+                            .font(.system(.body, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 10)
+                            .padding(.horizontal, 14)
+                            .allowsHitTesting(false)
+                    }
                 }
-
-                TextEditor(text: $noticeText)
-                    .font(.system(.body, design: .rounded))
-                    .foregroundStyle(.primary)
-                    .padding(8)
-                    .scrollContentBackground(.hidden)
-                    .background(editorBackground)
-                    .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 160, minHeight: 160)
     }
@@ -130,11 +147,25 @@ struct ContentView: View {
         window.level = isPinned ? .floating : .normal
 
         if isPinned {
-            window.collectionBehavior.insert([.canJoinAllSpaces, .fullScreenAuxiliary, .stationary])
+            window.collectionBehavior.remove(.fullScreenNone)
+            window.collectionBehavior.insert([.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .fullScreenAllowsTiling])
+            if pinnedFrame == nil {
+                pinnedFrame = window.frame
+            }
+            if let pinnedFrame {
+                window.setFrame(pinnedFrame, display: true)
+            }
+            window.isMovable = true
+            window.isMovableByWindowBackground = true
         } else {
             window.collectionBehavior.remove(.canJoinAllSpaces)
             window.collectionBehavior.remove(.fullScreenAuxiliary)
             window.collectionBehavior.remove(.stationary)
+            window.collectionBehavior.remove(.fullScreenAllowsTiling)
+            window.collectionBehavior.insert(.fullScreenNone)
+            window.isMovable = true
+            window.isMovableByWindowBackground = !isCollapsed
+            pinnedFrame = nil
         }
     }
 
@@ -192,6 +223,9 @@ struct ContentView: View {
                 window.animator().setFrame(targetFrame, display: true)
             }
 
+            if isPinned {
+                pinnedFrame = targetFrame
+            }
             self.expandedFrame = nil
             self.collapsedExpansionOffset = nil
         }
@@ -238,6 +272,9 @@ struct ContentView: View {
             }
             .onEnded { _ in
                 collapsedDragOffset = nil
+                if isPinned, let windowFrame = window?.frame {
+                    pinnedFrame = windowFrame
+                }
             }
     }
 

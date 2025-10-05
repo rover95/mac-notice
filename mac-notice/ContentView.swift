@@ -1,8 +1,12 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
+@MainActor
+/// 主公告板视图，负责窗口状态管理、文本编辑与剪贴板历史。
 struct ContentView: View {
+    // MARK: - 状态存储
     @AppStorage("noticeText") private var noticeText = ""
     @State private var isPinned = false
     @State private var isCollapsed = false
@@ -12,9 +16,17 @@ struct ContentView: View {
     @State private var collapsedDragOffset: NSPoint?
     @State private var collapsedExpansionOffset: NSPoint?
     @State private var pinnedFrame: NSRect?
+    @State private var isShowingHistory = false
+    @State private var clipboardHistory: [ClipboardEntry] = []
+    @State private var pasteboardChangeCount = NSPasteboard.general.changeCount
+    @State private var shouldIgnoreNextPasteboardChange = false
 
+    // MARK: - 常量定义
     private let expandedMinimumSize = CGSize(width: 200, height: 200)
+    private let maxHistoryEntries = 10
+    private let pasteboardMonitor = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
 
+    /// 根据折叠状态切换主界面布局和窗口外观。
     var body: some View {
         ZStack {
             if isCollapsed {
@@ -63,38 +75,33 @@ struct ContentView: View {
                   resizedWindow == window else { return }
             pinnedFrame = window.frame
         }
+        .onReceive(pasteboardMonitor) { _ in
+            captureClipboardIfNeeded()
+        }
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isCollapsed)
         .animation(.easeInOut(duration: 0.2), value: isPinned)
         .ignoresSafeArea()
         .environment(\.controlActiveState, .active)
     }
 
+    /// 展开状态下的公告板主体，包含头部控制和内容区。
     private var expandedBoard: some View {
         VStack(alignment: .leading, spacing: 16) {
             headerControls
 
-            TextEditor(text: $noticeText)
-                .font(.system(.body, design: .rounded))
-                .foregroundStyle(.primary)
-                .padding(8)
-                .scrollContentBackground(.hidden)
-                .background(editorBackground)
-                .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
-                .overlay(alignment: .topLeading) {
-                    if noticeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text("粘贴或输入公告…")
-                            .font(.system(.body, design: .rounded))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 10)
-                            .padding(.horizontal, 14)
-                            .allowsHitTesting(false)
-                    }
+            Group {
+                if isShowingHistory {
+                    clipboardHistoryList
+                } else {
+                    noticeEditor
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 160, minHeight: 160)
     }
 
+    /// 顶部控制栏，处理关闭、置顶、折叠等操作。
     private var headerControls: some View {
         HStack(spacing: 12) {
             CloseButton(action: closeWindow)
@@ -102,14 +109,71 @@ struct ContentView: View {
             ControlButton(systemName: "pin", isActive: isPinned, action: togglePin)
                 .help(isPinned ? "取消图钉" : "图钉置顶")
 
+            ControlButton(systemName: "clock.arrow.circlepath", isActive: isShowingHistory, action: toggleHistoryMode)
+                .help(isShowingHistory ? "返回公告栏" : "查看历史剪贴板")
+
             Spacer(minLength: 12)
 
             ControlButton(systemName: "bubble.left.and.bubble.right", isActive: isCollapsed, action: toggleCollapse)
                 .help("收起为气泡")
+
+            ControlButton(systemName: "square.and.arrow.up", isActive: false, action: exportCurrentContent)
+                .help("导出文本")
         }
         .padding(.top, 2)
     }
 
+    /// 公告编辑器区域，提供文本输入和占位提示。
+    private var noticeEditor: some View {
+        TextEditor(text: $noticeText)
+            .font(.system(.body, design: .rounded))
+            .foregroundStyle(.primary)
+            .padding(8)
+            .scrollContentBackground(.hidden)
+            .background(editorBackground)
+            .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
+            .overlay(alignment: .topLeading) {
+                if noticeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("粘贴或输入公告…")
+                        .font(.system(.body, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 10)
+                        .padding(.horizontal, 14)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+
+    /// 剪贴板历史列表，支持点击回填。
+    private var clipboardHistoryList: some View {
+        ZStack(alignment: .topLeading) {
+            if clipboardHistory.isEmpty {
+                Text("暂无历史剪贴板")
+                    .font(.system(.body, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 12)
+                    .padding(.horizontal, 14)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(clipboardHistory) { entry in
+                            Button(action: { copyToPasteboard(entry.text) }) {
+                                ClipboardHistoryRow(text: entry.text)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 2)
+                }
+            }
+        }
+        .padding(8)
+        .background(editorBackground)
+        .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
+    }
+
+    /// 折叠态圆形按钮，支持拖拽和点击展开。
     private var collapsedBubble: some View {
         Group {
             if #available(macOS 26.0, *) {
@@ -125,16 +189,26 @@ struct ContentView: View {
         .accessibilityLabel("展开公告板")
     }
 
+    /// 切换窗口是否置顶到所有空间。
     private func togglePin() {
         isPinned.toggle()
     }
 
+    /// 折叠或展开窗口，同时触发弹簧动画。
     private func toggleCollapse() {
         withAnimation(.spring(response: 0.32, dampingFraction: 0.74)) {
             isCollapsed.toggle()
         }
     }
 
+    /// 切换展示公告编辑与剪贴板历史。
+    private func toggleHistoryMode() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            isShowingHistory.toggle()
+        }
+    }
+
+    /// 关闭窗口并终止应用。
     private func closeWindow() {
         if let window {
             window.close()
@@ -142,6 +216,7 @@ struct ContentView: View {
         NSApp.terminate(nil)
     }
 
+    /// 根据置顶状态调整窗口层级和行为。
     private func updateWindowLevel() {
         guard let window else { return }
         window.level = isPinned ? .floating : .normal
@@ -169,6 +244,7 @@ struct ContentView: View {
         }
     }
 
+    /// 将窗口折叠为气泡或恢复到记录的矩形大小。
     private func applyCollapseState(_ collapsed: Bool, animated: Bool = true) {
         guard let window else { return }
 
@@ -231,6 +307,109 @@ struct ContentView: View {
         }
     }
 
+    /// 轮询剪贴板变更并记录新的文本条目。
+    private func captureClipboardIfNeeded() {
+        let pasteboard = NSPasteboard.general
+        let currentChangeCount = pasteboard.changeCount
+
+        guard currentChangeCount != pasteboardChangeCount else { return }
+        pasteboardChangeCount = currentChangeCount
+
+        if shouldIgnoreNextPasteboardChange {
+            shouldIgnoreNextPasteboardChange = false
+            return
+        }
+
+        guard let clipboardString = pasteboard.string(forType: .string) else { return }
+        let normalized = clipboardString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+
+        addClipboardEntry(clipboardString)
+    }
+
+    /// 将最新剪贴板内容添加到历史列表并裁剪长度。
+    private func addClipboardEntry(_ text: String) {
+        if clipboardHistory.first?.text == text {
+            return
+        }
+
+        let entry = ClipboardEntry(text: text)
+        clipboardHistory.insert(entry, at: 0)
+
+        if clipboardHistory.count > maxHistoryEntries {
+            clipboardHistory = Array(clipboardHistory.prefix(maxHistoryEntries))
+        }
+    }
+
+    @MainActor
+    /// 将选中的历史内容写回剪贴板，可选跳过历史记录。
+    private func copyToPasteboard(_ text: String, suppressHistoryUpdate: Bool = true) {
+        let pasteboard = NSPasteboard.general
+        shouldIgnoreNextPasteboardChange = suppressHistoryUpdate
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        pasteboardChangeCount = pasteboard.changeCount
+    }
+
+    @MainActor
+    /// 导出当前公告或历史列表为文本文件。
+    private func exportCurrentContent() {
+        let content: String
+        let suggestedName: String
+
+        if isShowingHistory {
+            content = clipboardHistory.map(\.text).joined(separator: "\n\n")
+            suggestedName = "ClipboardHistory"
+        } else {
+            content = noticeText
+            suggestedName = "Notice"
+        }
+
+        presentSavePanel(with: content, suggestedFileName: suggestedName)
+    }
+
+    @MainActor
+    /// 弹出保存面板并写入导出的文本内容。
+    private func presentSavePanel(with content: String, suggestedFileName: String) {
+        let panel = NSSavePanel()
+        panel.allowsOtherFileTypes = false
+        if #available(macOS 12.0, *) {
+            panel.allowedContentTypes = [.plainText]
+        } else {
+            panel.allowedFileTypes = ["txt"]
+        }
+        panel.canCreateDirectories = true
+
+        if suggestedFileName.lowercased().hasSuffix(".txt") {
+            panel.nameFieldStringValue = suggestedFileName
+        } else {
+            panel.nameFieldStringValue = "\(suggestedFileName).txt"
+        }
+
+        let writeContent: (URL) -> Void = { url in
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                NSLog("Failed to export text: %@", error.localizedDescription)
+            }
+        }
+
+        if let hostingWindow = window ?? NSApp.keyWindow ?? NSApp.mainWindow {
+            if !hostingWindow.isKeyWindow {
+                hostingWindow.makeKeyAndOrderFront(nil)
+            }
+            panel.beginSheetModal(for: hostingWindow) { response in
+                guard response == .OK, let url = panel.url else { return }
+                writeContent(url)
+            }
+        } else {
+            let response = panel.runModal()
+            guard response == .OK, let url = panel.url else { return }
+            writeContent(url)
+        }
+    }
+
+    /// 初始化窗口外观和交互，仅执行一次。
     private func configureWindowIfNeeded() {
         guard let window, !hasConfiguredWindow else { return }
         hasConfiguredWindow = true
@@ -242,12 +421,16 @@ struct ContentView: View {
         window.isOpaque = false
         window.hasShadow = true
         window.collectionBehavior.insert(.fullScreenNone)
-        window.styleMask = [.borderless, .resizable]
+        window.styleMask = [.titled, .resizable, .fullSizeContentView]
+        window.standardWindowButton(.closeButton)?.isHidden = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
         window.invalidateShadow()
         window.setFrameAutosaveName("NoticeBoardWindow")
         window.minSize = NSSize(width: expandedMinimumSize.width, height: expandedMinimumSize.height)
     }
 
+    /// 折叠态下的拖拽手势，用于移动气泡位置。
     private var collapsedDragGesture: some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
@@ -278,6 +461,7 @@ struct ContentView: View {
             }
     }
 
+    /// 根据折叠状态选择圆形或圆角矩形外观。
     private var currentSurfaceShape: AnyShape {
         if isCollapsed {
             return AnyShape(Circle())
@@ -287,20 +471,22 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    /// 渲染主面板（展开态）的玻璃/磨砂背景；折叠态不渲染外层容器。
     private var surfaceBackground: some View {
-        if #available(macOS 26.0, *) {
-            LiquidGlassSurface(isCollapsed: isCollapsed)
+        if isCollapsed {
+            EmptyView()
         } else {
-            if isCollapsed {
-                FrostedBubbleBackground()
+            if #available(macOS 26.0, *) {
+                PanelGlassBackground()
             } else {
-                FrostedPanelBackground(cornerRadius: 28)
+                PanelFrostedBackground(cornerRadius: 28)
             }
         }
     }
 }
 
 @ViewBuilder
+/// 编辑区域的玻璃效果背景。
 private var editorBackground: some View {
     if #available(macOS 26.0, *) {
         LiquidGlassEditorBackground()
@@ -310,43 +496,60 @@ private var editorBackground: some View {
 }
 
 @available(macOS 26.0, *)
-private struct LiquidGlassSurface: View {
-    let isCollapsed: Bool
-
+/// 展开态主面板的液态玻璃背景（无描边）。
+private struct PanelGlassBackground: View {
     var body: some View {
-        GlassEffectContainer {
-            Color.clear
-        }
-        .modifier(LiquidGlassShapeModifier(isCollapsed: isCollapsed))
+        let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+        GlassEffectContainer { Color.clear }
+            .glassEffect(.clear, in: shape)
     }
 }
 
-@available(macOS 26.0, *)
-private struct LiquidGlassShapeModifier: ViewModifier {
-    let isCollapsed: Bool
-
-    func body(content: Content) -> some View {
-        if isCollapsed {
-            content
-                .glassEffect(
-                    .clear
-                        .interactive(),
-                    in: Circle()
-                )
-        } else {
-            content
-                .glassEffect(
-                    .clear,
-                    in: RoundedRectangle(cornerRadius: 28, style: .continuous)
-                )
-        }
+/// 旧系统下的主面板磨砂背景（无描边）。
+private struct PanelFrostedBackground: View {
+    let cornerRadius: CGFloat
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        shape
+            .fill(Color.white.opacity(0.08))
+            .background(.regularMaterial, in: shape)
     }
 }
 
+// 已移除外层容器，避免面板与气泡之外出现边框/透明包裹层。
+// 如需恢复整体玻璃背景，可将 `surfaceBackground` 切换为下方实现。
+// @available(macOS 26.0, *)
+// private struct LiquidGlassSurface: View {
+//     let isCollapsed: Bool
+//     var body: some View {
+//         GlassEffectContainer { Color.clear }
+//             .modifier(LiquidGlassShapeModifier(isCollapsed: isCollapsed))
+//     }
+// }
+
+// @available(macOS 26.0, *)
+// private struct LiquidGlassShapeModifier: ViewModifier {
+//     let isCollapsed: Bool
+//     func body(content: Content) -> some View {
+//         if isCollapsed {
+//             content.glassEffect(.clear.interactive(), in: Circle())
+//         } else {
+//             content.glassEffect(.clear, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+//         }
+//     }
+// }
+
 @available(macOS 26.0, *)
+/// 折叠气泡（无外轮廓描边）。
 private struct LiquidGlassCollapsedBubble: View {
     var body: some View {
-        GlassEffectContainer {
+        ZStack {
+            // 使用无描边的磨砂圆形作为背景，避免出现边框线
+            Circle()
+                .fill(Color.white.opacity(0.12))
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+
             Image(systemName: "bubble.left.and.bubble.right.fill")
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
                 .symbolRenderingMode(.palette)
@@ -354,29 +557,34 @@ private struct LiquidGlassCollapsedBubble: View {
                 .frame(width: 36, height: 36)
                 .padding(6)
         }
-        .glassEffect(
-            .clear
-                .interactive(),
-            in: Circle()
-        )
         .frame(width: 56, height: 56)
         .contentShape(Circle())
     }
 }
 
+/// 兼容旧系统的折叠气泡样式（无描边）。
 private struct LegacyCollapsedBubble: View {
     var body: some View {
-        Image(systemName: "bubble.left.and.bubble.right.fill")
-            .font(.system(size: 24, weight: .semibold, design: .rounded))
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
-            .frame(width: 36, height: 36)
-            .padding(6)
-            .contentShape(Circle())
+        ZStack {
+            Circle()
+                .fill(Color.white.opacity(0.12))
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
+                .frame(width: 36, height: 36)
+                .padding(6)
+        }
+        .frame(width: 56, height: 56)
+        .contentShape(Circle())
     }
 }
 
 @available(macOS 26.0, *)
+/// 玻璃效果编辑器背景，提供层次感。
 private struct LiquidGlassEditorBackground: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -400,6 +608,43 @@ private struct LiquidGlassEditorBackground: View {
     }
 }
 
+/// 单条剪贴板历史的行视图。
+private struct ClipboardHistoryRow: View {
+    let text: String
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+
+        Text(text)
+            .font(.system(.body, design: .rounded))
+            .foregroundStyle(.primary)
+            .lineLimit(2)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .background {
+                shape
+                    .fill(Color.white.opacity(0.06))
+                    .background(.regularMaterial, in: shape)
+                    .overlay {
+                        shape
+                            .stroke(Color.white.opacity(0.18), lineWidth: 0.8)
+                            .blendMode(.overlay)
+                    }
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+            }
+            .contentShape(shape)
+    }
+}
+
+/// 表示剪贴板历史项的数据模型。
+private struct ClipboardEntry: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let text: String
+}
+
+/// 旧系统下的编辑器磨砂背景。
 private struct LegacyEditorBackground: View {
     var body: some View {
         RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -416,6 +661,7 @@ private struct LegacyEditorBackground: View {
     }
 }
 
+/// 顶部控制按钮的通用样式。
 private struct ControlButton: View {
     let systemName: String
     let isActive: Bool
@@ -444,6 +690,7 @@ private struct ControlButton: View {
     }
 }
 
+/// 顶部关闭按钮，触发退出应用。
 private struct CloseButton: View {
     let action: () -> Void
 
@@ -470,6 +717,7 @@ private struct CloseButton: View {
     }
 }
 
+/// 旧版展开面板的磨砂背景。
 private struct FrostedPanelBackground: View {
     let cornerRadius: CGFloat
 
@@ -489,6 +737,7 @@ private struct FrostedPanelBackground: View {
     }
 }
 
+/// 旧版折叠气泡的磨砂背景。
 private struct FrostedBubbleBackground: View {
     var body: some View {
         Circle()
@@ -505,6 +754,7 @@ private struct FrostedBubbleBackground: View {
 }
 
 
+/// 将泛型 Shape 装箱为类型擦除结构。
 private struct AnyShape: Shape {
     private let pathClosure: (CGRect) -> Path
 
@@ -519,6 +769,7 @@ private struct AnyShape: Shape {
     }
 }
 
+/// 捕获宿主 NSWindow，用于窗口配置。
 private struct WindowAccessor: NSViewRepresentable {
     @Binding var window: NSWindow?
 

@@ -1,30 +1,22 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- mac-notice/mac_noticeApp.swift boots the SwiftUI app and should remain focused on scene configuration.
-- mac-notice/ContentView.swift holds the primary UI; add new views in mac-notice/Views/ and share reusable modifiers in mac-notice/Components/ when the project grows.
-- Store assets such as app icons or color sets in mac-notice/Assets.xcassets and keep naming aligned with their usage (e.g., `SecondaryBackground`).
+mac-notice/ hosts the SwiftUI code. `mac_noticeApp.swift` configures the main scene; avoid placing business logic there. Keep feature views inside `mac-notice/Views/` and share reusable modifiers, colors, or helpers in `mac-notice/Components/`. Assets such as app icons and named colors belong in `mac-notice/Assets.xcassets` (e.g., `SecondaryBackground`). Mirror future testable logic under `mac-noticeTests/` once added.
 
 ## Build, Test, and Development Commands
-- `open mac-notice/mac-notice.xcodeproj` launches the workspace in Xcode; use the default `mac-notice` scheme for editing and previews.
-- `xcodebuild -scheme mac-notice build` performs a CI-friendly build; add `-quiet` during automation to trim log noise.
-- `xcodebuild -scheme mac-notice test -destination "platform=macOS"` runs unit tests once a test target is present; mirror CI settings locally.
+- `open mac-notice/mac-notice.xcodeproj` — launch the project in Xcode with the `mac-notice` scheme for live previews.
+- `xcodebuild -scheme mac-notice build` — run a CI-style build; append `-quiet` in scripts to curb log noise.
+- `xcodebuild -scheme mac-notice test -destination "platform=macOS"` — execute XCTest bundles when the test target exists.
+Store automation scripts in `build/` if needed and keep derived data outside the repo.
 
 ## Coding Style & Naming Conventions
-- Follow Swift API Design Guidelines: PascalCase for types (`NoticeBannerView`), camelCase for functions and properties, and uppercase for static constants when appropriate.
-- Keep indentation at 4 spaces, prefer `let` over `var`, and group related view modifiers for readability.
-- Run Xcode’s `Editor > Structure > Re-Indent` (⌃I) before committing; apply `swift-format` if introduced to keep style consistent across contributors.
+Follow Swift API Design Guidelines: types use PascalCase (`NoticeBannerView`), methods and stored properties are camelCase, and shared constants use upper camel or SCREAMING_SNAKE when static. Indent with 4 spaces and group related modifiers. Prefer immutable `let` bindings, and keep view builders slim by extracting helpers. Re-indent files with Xcode (⌃I) before committing; apply `swift-format` once configured.
 
 ## Testing Guidelines
-- Add a `mac-noticeTests` target under mac-notice/ whenever logic exceeds simple view rendering; mirror source file names with a `Tests` suffix (`ContentViewTests`).
-- Aim for fast, deterministic tests using XCTest; favor view model coverage and snapshot checks for SwiftUI components.
-- Execute `xcodebuild test` locally before opening a pull request and ensure new features ship with at least one new assertion.
+Use XCTest for view models and logic. Name suites after the source file plus `Tests` (e.g., `ContentViewTests`). Write fast, deterministic tests that set up fixtures in `setUp()` and clean in `tearDown()`. Run `xcodebuild test` locally prior to pushing and capture failures with screenshots or logs when UI assertions are involved.
 
 ## Commit & Pull Request Guidelines
-- Write concise, imperative commit summaries (e.g., "Add banner dismissal state"), mirroring the existing history.
-- Squash incidental fixups before review, link tickets in the body (`Closes #123`), and mention affected areas.
-- Pull requests should outline intent, testing performed, and attach screenshots or screen recordings for UI changes.
+Author concise, imperative commit subjects such as "Add banner dismissal state." Consolidate fixups locally and reference issues in the body (`Closes #123`). Pull requests should summarize intent, enumerate manual or automated tests, and attach screenshots or recordings for UI-facing changes. Mention configuration updates or new environment variables explicitly.
 
-## Configuration & Secrets
-- Do not commit personal signing certificates, API tokens, or machine-specific settings; prefer `.xcconfig` overlays ignored by git.
-- Document required environment variables in the pull request and scrub sensitive data from captured logs before sharing.
+## Security & Configuration Tips
+Never commit signing identities, API tokens, or machine-specific settings. Prefer `.xcconfig` overlays and document required secrets in the PR description. Scrub personal data from logs before sharing build artifacts.

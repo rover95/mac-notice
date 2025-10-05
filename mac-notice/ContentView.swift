@@ -18,11 +18,18 @@ struct ContentView: View {
     @State private var pinnedFrame: NSRect?
     @State private var isShowingHistory = false
     @State private var clipboardHistory: [ClipboardEntry] = []
+    @State private var noticeItems: [NoticeEntry] = []
+    @State private var noticeInput: String = ""
     @State private var pasteboardChangeCount = NSPasteboard.general.changeCount
     @State private var shouldIgnoreNextPasteboardChange = false
+    @State private var originalStyleMask: NSWindow.StyleMask?
+    @State private var originalHasShadow: Bool = true
+    @State private var showCopiedTip = false
+    @State private var copiedTipMessage = "已复制"
 
     // MARK: - 常量定义
     private let expandedMinimumSize = CGSize(width: 200, height: 200)
+    private let panelCornerRadius: CGFloat = 14
     private let maxHistoryEntries = 10
     private let pasteboardMonitor = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
 
@@ -93,12 +100,18 @@ struct ContentView: View {
                 if isShowingHistory {
                     clipboardHistoryList
                 } else {
-                    noticeEditor
+                    noticeBoardList
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 160, minHeight: 160)
+        .overlay(alignment: .center) {
+            if showCopiedTip {
+                CopiedTipView(text: copiedTipMessage)
+                    .transition(.opacity)
+            }
+        }
     }
 
     /// 顶部控制栏，处理关闭、置顶、折叠等操作。
@@ -123,44 +136,44 @@ struct ContentView: View {
         .padding(.top, 2)
     }
 
-    /// 公告编辑器区域，提供文本输入和占位提示。
-    private var noticeEditor: some View {
-        TextEditor(text: $noticeText)
-            .font(.system(.body, design: .rounded))
-            .foregroundStyle(.primary)
-            .padding(8)
-            .scrollContentBackground(.hidden)
-            .background(editorBackground)
-            .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
-            .overlay(alignment: .topLeading) {
-                if noticeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("粘贴或输入公告…")
-                        .font(.system(.body, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 10)
-                        .padding(.horizontal, 14)
-                        .allowsHitTesting(false)
+    /// 公告条目列表，顶部为输入框，回车新增为条目。
+    private var noticeBoardList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                NoticeInputRow(text: $noticeInput, onSubmit: addNoticeFromInput)
+                ForEach(noticeItems) { entry in
+                    ClipboardHistoryRow(
+                        text: entry.text,
+                        onCopy: { copyToPasteboard(entry.text) },
+                        onDelete: { deleteNoticeEntry(entry) }
+                    )
                 }
             }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 2)
+        }
+        .padding(8)
+        .background(editorBackground)
+        .shadow(color: .black.opacity(0.08), radius: 18, y: 12)
     }
 
     /// 剪贴板历史列表，支持点击回填。
     private var clipboardHistoryList: some View {
         ZStack(alignment: .topLeading) {
             if clipboardHistory.isEmpty {
-                Text("暂无历史剪贴板")
-                    .font(.system(.body, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 12)
+                EmptyHistoryBubble(text: "暂无历史剪贴板")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
                     .padding(.horizontal, 14)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(clipboardHistory) { entry in
-                            Button(action: { copyToPasteboard(entry.text) }) {
-                                ClipboardHistoryRow(text: entry.text)
-                            }
-                            .buttonStyle(.plain)
+                            ClipboardHistoryRow(
+                                text: entry.text,
+                                onCopy: { copyToPasteboard(entry.text) },
+                                onDelete: { deleteClipboardEntry(entry) }
+                            )
                         }
                     }
                     .padding(.vertical, 4)
@@ -270,6 +283,11 @@ struct ContentView: View {
 
             window.minSize = bubbleSize
             window.isMovableByWindowBackground = false
+            if originalStyleMask == nil { originalStyleMask = window.styleMask }
+            originalHasShadow = window.hasShadow
+            window.hasShadow = false
+            window.styleMask = [.borderless]
+            window.invalidateShadow()
 
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = animationDuration
@@ -278,6 +296,18 @@ struct ContentView: View {
         } else {
             window.minSize = NSSize(width: expandedMinimumSize.width, height: expandedMinimumSize.height)
             window.isMovableByWindowBackground = true
+            if let mask = originalStyleMask {
+                window.styleMask = mask
+                originalStyleMask = nil
+            }
+            window.hasShadow = originalHasShadow
+            window.invalidateShadow()
+            // 还原为面板时再次隐藏三键按钮与标题栏视觉
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
 
             guard let storedExpandedFrame = expandedFrame else { return }
 
@@ -341,6 +371,25 @@ struct ContentView: View {
         }
     }
 
+    /// 将输入框内容作为公告条目新增到列表。
+    private func addNoticeFromInput() {
+        let normalized = noticeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        let entry = NoticeEntry(text: normalized)
+        noticeItems.insert(entry, at: 0)
+        noticeInput = ""
+    }
+
+    /// 删除一个剪贴板历史条目。
+    private func deleteClipboardEntry(_ entry: ClipboardEntry) {
+        clipboardHistory.removeAll { $0.id == entry.id }
+    }
+
+    /// 删除一个公告条目。
+    private func deleteNoticeEntry(_ entry: NoticeEntry) {
+        noticeItems.removeAll { $0.id == entry.id }
+    }
+
     @MainActor
     /// 将选中的历史内容写回剪贴板，可选跳过历史记录。
     private func copyToPasteboard(_ text: String, suppressHistoryUpdate: Bool = true) {
@@ -349,6 +398,14 @@ struct ContentView: View {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         pasteboardChangeCount = pasteboard.changeCount
+        // 显示“已复制”提示
+        showCopiedTip = true
+        copiedTipMessage = "已复制"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showCopiedTip = false
+            }
+        }
     }
 
     @MainActor
@@ -361,7 +418,12 @@ struct ContentView: View {
             content = clipboardHistory.map(\.text).joined(separator: "\n\n")
             suggestedName = "ClipboardHistory"
         } else {
-            content = noticeText
+            // 导出公告条目列表
+            if noticeItems.isEmpty {
+                content = noticeInput
+            } else {
+                content = noticeItems.map(\.text).joined(separator: "\n\n")
+            }
             suggestedName = "Notice"
         }
 
@@ -466,7 +528,7 @@ struct ContentView: View {
         if isCollapsed {
             return AnyShape(Circle())
         } else {
-            return AnyShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            return AnyShape(RoundedRectangle(cornerRadius: panelCornerRadius, style: .continuous))
         }
     }
 
@@ -477,9 +539,9 @@ struct ContentView: View {
             EmptyView()
         } else {
             if #available(macOS 26.0, *) {
-                PanelGlassBackground()
+                PanelGlassBackground(cornerRadius: panelCornerRadius)
             } else {
-                PanelFrostedBackground(cornerRadius: 28)
+                PanelFrostedBackground(cornerRadius: panelCornerRadius)
             }
         }
     }
@@ -498,10 +560,23 @@ private var editorBackground: some View {
 @available(macOS 26.0, *)
 /// 展开态主面板的液态玻璃背景（无描边）。
 private struct PanelGlassBackground: View {
+    let cornerRadius: CGFloat
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         GlassEffectContainer { Color.clear }
             .glassEffect(.clear, in: shape)
+            .mask(shape.inset(by: 0.8))
+            .compositingGroup()
+            .overlay {
+                shape
+                    .fill(Color.black.opacity(0.02))
+                    .blendMode(.multiply)
+            }
+            .overlay {
+                shape
+                    .fill(Color.white.opacity(0.02))
+                    .blendMode(.plusLighter)
+            }
     }
 }
 
@@ -540,22 +615,29 @@ private struct PanelFrostedBackground: View {
 // }
 
 @available(macOS 26.0, *)
-/// 折叠气泡（无外轮廓描边）。
+/// 折叠气泡（玻璃效果且无边框）。
 private struct LiquidGlassCollapsedBubble: View {
     var body: some View {
-        ZStack {
-            // 使用无描边的磨砂圆形作为背景，避免出现边框线
-            Circle()
-                .fill(Color.white.opacity(0.12))
-                .background(.regularMaterial, in: Circle())
-                .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
-
+        GlassEffectContainer {
             Image(systemName: "bubble.left.and.bubble.right.fill")
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
                 .frame(width: 36, height: 36)
                 .padding(6)
+        }
+        .glassEffect(.clear.interactive(), in: Circle())
+        .mask(Circle().inset(by: 0.8))
+        .compositingGroup()
+        .overlay {
+            Circle()
+                .fill(Color.black.opacity(0.02))
+                .blendMode(.multiply)
+        }
+        .overlay {
+            Circle()
+                .fill(Color.white.opacity(0.02))
+                .blendMode(.plusLighter)
         }
         .frame(width: 56, height: 56)
         .contentShape(Circle())
@@ -611,28 +693,109 @@ private struct LiquidGlassEditorBackground: View {
 /// 单条剪贴板历史的行视图。
 private struct ClipboardHistoryRow: View {
     let text: String
+    var onCopy: (() -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
+    @State private var isHovering = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
 
+        ZStack(alignment: .topLeading) {
+            Text(text)
+                .font(.system(.body, design: .rounded))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 12)
+                .padding(.horizontal, 14)
+                .background {
+                    if #available(macOS 26.0, *) {
+                        GlassEffectContainer { Color.clear }
+                            .glassEffect(.clear, in: shape)
+                            .mask(shape.inset(by: 0.8))
+                            .overlay { shape.fill(Color.black.opacity(0.5)).blendMode(.multiply) }
+                            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+                    } else {
+                        shape
+                            .fill(Color.white.opacity(0.06))
+                            .background(.regularMaterial, in: shape)
+                            .overlay { shape.fill(Color.black.opacity(0.5)).blendMode(.multiply) }
+                            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+                    }
+                }
+                .contentShape(shape)
+                .onTapGesture { onCopy?() }
+
+            if let onDelete {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .background(Color.clear)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("删除条目")
+                .opacity(isHovering ? 1 : 0)
+                .offset(x: -2, y: -2)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: isHovering)
+        .onHover { isHovering = $0 }
+    }
+}
+
+/// 复制完成提示气泡。
+private struct CopiedTipView: View {
+    let text: String
+    var body: some View {
+        let shape = Capsule(style: .continuous)
         Text(text)
-            .font(.system(.body, design: .rounded))
+            .font(.system(.footnote, design: .rounded))
             .foregroundStyle(.primary)
-            .lineLimit(2)
-            .truncationMode(.tail)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 12)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .background {
+                if #available(macOS 26.0, *) {
+                    GlassEffectContainer { Color.clear }
+                        .glassEffect(.clear, in: shape)
+                        .mask(shape.inset(by: 0.6))
+                } else {
+                    shape.fill(Color.white.opacity(0.12)).background(.regularMaterial, in: shape)
+                }
+            }
+            .contentShape(shape)
+    }
+}
+
+/// 空状态的小气泡容器，气泡内文案垂直居中。
+private struct EmptyHistoryBubble: View {
+    let text: String
+
+    var body: some View {
+        let shape = Capsule(style: .continuous)
+
+        return Text(text)
+            .font(.system(.body, design: .rounded))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.vertical, 10)
             .padding(.horizontal, 14)
             .background {
-                shape
-                    .fill(Color.white.opacity(0.06))
-                    .background(.regularMaterial, in: shape)
-                    .overlay {
-                        shape
-                            .stroke(Color.white.opacity(0.18), lineWidth: 0.8)
-                            .blendMode(.overlay)
-                    }
-                    .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+                if #available(macOS 26.0, *) {
+                    GlassEffectContainer { Color.clear }
+                        .glassEffect(.clear, in: shape)
+                        .mask(shape.inset(by: 0.8))
+                        .compositingGroup()
+                        .overlay { shape.fill(Color.black.opacity(0.02)).blendMode(.multiply) }
+                        .overlay { shape.fill(Color.white.opacity(0.02)).blendMode(.plusLighter) }
+                        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+                } else {
+                    shape
+                        .fill(Color.white.opacity(0.06))
+                        .background(.regularMaterial, in: shape)
+                        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+                }
             }
             .contentShape(shape)
     }
@@ -640,6 +803,12 @@ private struct ClipboardHistoryRow: View {
 
 /// 表示剪贴板历史项的数据模型。
 private struct ClipboardEntry: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let text: String
+}
+
+/// 公告条目数据模型。
+private struct NoticeEntry: Identifiable, Equatable, Sendable {
     let id = UUID()
     let text: String
 }
@@ -714,6 +883,48 @@ private struct CloseButton: View {
         }
         .buttonStyle(.plain)
         .help("关闭公告栏")
+    }
+}
+
+/// 公告输入行：样式与条目一致，按回车新增。
+private struct NoticeInputRow: View {
+    @Binding var text: String
+    var onSubmit: () -> Void
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "plus.circle.fill")
+                .foregroundStyle(Color.accentColor)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+
+            TextField("输入公告内容，按回车添加", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(.body, design: .rounded))
+                .onSubmit {
+                    onSubmit()
+                }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background {
+            if #available(macOS 26.0, *) {
+                GlassEffectContainer { Color.clear }
+                    .glassEffect(.clear, in: shape)
+                    .mask(shape.inset(by: 0.8))
+                    .overlay { shape.fill(Color.black.opacity(0.5)).blendMode(.multiply) }
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+            } else {
+                shape
+                    .fill(Color.white.opacity(0.06))
+                    .background(.regularMaterial, in: shape)
+                    .overlay { shape.fill(Color.black.opacity(0.5)).blendMode(.multiply) }
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+            }
+        }
+        .contentShape(shape)
     }
 }
 

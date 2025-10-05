@@ -32,6 +32,7 @@ struct ContentView: View {
     private let panelCornerRadius: CGFloat = 14
     private let maxHistoryEntries = 10
     private let pasteboardMonitor = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
+    @State private var hasLoadedPersistence = false
 
     /// 根据折叠状态切换主界面布局和窗口外观。
     var body: some View {
@@ -84,6 +85,19 @@ struct ContentView: View {
         }
         .onReceive(pasteboardMonitor) { _ in
             captureClipboardIfNeeded()
+        }
+        .onAppear {
+            if !hasLoadedPersistence {
+                loadPersistedNoticeItems()
+                loadPersistedClipboardHistory()
+                hasLoadedPersistence = true
+            }
+        }
+        .onChange(of: noticeItems) { _ in
+            saveNoticeItems()
+        }
+        .onChange(of: clipboardHistory) { _ in
+            saveClipboardHistory()
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isCollapsed)
         .animation(.easeInOut(duration: 0.2), value: isPinned)
@@ -388,6 +402,69 @@ struct ContentView: View {
     /// 删除一个公告条目。
     private func deleteNoticeEntry(_ entry: NoticeEntry) {
         noticeItems.removeAll { $0.id == entry.id }
+    }
+
+    // MARK: - 持久化存储（Application Support/"mac-notice" 文件夹）
+    private func storageDirectoryURL() -> URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let dir = base.appendingPathComponent("mac-notice", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            NSLog("Failed to create storage dir: %@", error.localizedDescription)
+        }
+        return dir
+    }
+
+    private func storageURL(fileName: String) -> URL? {
+        storageDirectoryURL()?.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    @MainActor
+    private func saveNoticeItems() {
+        guard let url = storageURL(fileName: "noticeItems.json") else { return }
+        do {
+            let data = try JSONEncoder().encode(noticeItems)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            NSLog("Failed to save notice items: %@", error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func loadPersistedNoticeItems() {
+        guard let url = storageURL(fileName: "noticeItems.json") else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            let items = try JSONDecoder().decode([NoticeEntry].self, from: data)
+            noticeItems = items
+        } catch {
+            // 首次运行或解码失败时静默忽略
+        }
+    }
+
+    @MainActor
+    private func saveClipboardHistory() {
+        guard let url = storageURL(fileName: "clipboardHistory.json") else { return }
+        do {
+            let trimmed = Array(clipboardHistory.prefix(maxHistoryEntries))
+            let data = try JSONEncoder().encode(trimmed)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            NSLog("Failed to save clipboard history: %@", error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func loadPersistedClipboardHistory() {
+        guard let url = storageURL(fileName: "clipboardHistory.json") else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            let items = try JSONDecoder().decode([ClipboardEntry].self, from: data)
+            clipboardHistory = Array(items.prefix(maxHistoryEntries))
+        } catch {
+            // 首次运行或解码失败时静默忽略
+        }
     }
 
     @MainActor
@@ -802,13 +879,13 @@ private struct EmptyHistoryBubble: View {
 }
 
 /// 表示剪贴板历史项的数据模型。
-private struct ClipboardEntry: Identifiable, Equatable, Sendable {
+private struct ClipboardEntry: Identifiable, Equatable, Sendable, Codable {
     let id = UUID()
     let text: String
 }
 
 /// 公告条目数据模型。
-private struct NoticeEntry: Identifiable, Equatable, Sendable {
+private struct NoticeEntry: Identifiable, Equatable, Sendable, Codable {
     let id = UUID()
     let text: String
 }

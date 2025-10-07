@@ -28,11 +28,12 @@ struct ContentView: View {
     @State private var copiedTipMessage = "已复制"
 
     // MARK: - 常量定义
-    private let expandedMinimumSize = CGSize(width: 200, height: 200)
+    private let expandedMinimumSize = CGSize(width: 280, height: 240)
     private let panelCornerRadius: CGFloat = 14
-    private let maxHistoryEntries = 10
+    @AppStorage("maxHistoryEntries") private var maxHistoryEntries: Int = 10
     private let pasteboardMonitor = Timer.publish(every: 0.6, on: .main, in: .common).autoconnect()
     @State private var hasLoadedPersistence = false
+    @State private var isShowingSettings = false
 
     /// 根据折叠状态切换主界面布局和窗口外观。
     var body: some View {
@@ -99,10 +100,24 @@ struct ContentView: View {
         .onChange(of: clipboardHistory) { _ in
             saveClipboardHistory()
         }
+        .onChange(of: maxHistoryEntries) { newValue in
+            var v = newValue
+            if v < 1 { v = 1 }
+            if v > 999 { v = 999 }
+            if v != newValue { maxHistoryEntries = v }
+            if clipboardHistory.count > v {
+                clipboardHistory = Array(clipboardHistory.prefix(v))
+            }
+            saveClipboardHistory()
+        }
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isCollapsed)
         .animation(.easeInOut(duration: 0.2), value: isPinned)
         .ignoresSafeArea()
         .environment(\.controlActiveState, .active)
+        .sheet(isPresented: $isShowingSettings) {
+            SettingsSheet(maxHistoryEntries: $maxHistoryEntries)
+                .frame(width: 360)
+        }
     }
 
     /// 展开状态下的公告板主体，包含头部控制和内容区。
@@ -133,16 +148,20 @@ struct ContentView: View {
         HStack(spacing: 12) {
             CloseButton(action: closeWindow)
 
+            // 折叠/展开按钮紧邻关闭按钮
+            ControlButton(systemName: isCollapsed ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left", isActive: isCollapsed, action: toggleCollapse)
+                .help(isCollapsed ? "展开公告板" : "收起为气泡")
+
             ControlButton(systemName: "pin", isActive: isPinned, action: togglePin)
                 .help(isPinned ? "取消图钉" : "图钉置顶")
 
             ControlButton(systemName: "clock.arrow.circlepath", isActive: isShowingHistory, action: toggleHistoryMode)
                 .help(isShowingHistory ? "返回公告栏" : "查看历史剪贴板")
 
-            Spacer(minLength: 12)
+            ControlButton(systemName: "gearshape", isActive: false, action: { isShowingSettings = true })
+                .help("设置")
 
-            ControlButton(systemName: "bubble.left.and.bubble.right", isActive: isCollapsed, action: toggleCollapse)
-                .help("收起为气泡")
+            Spacer(minLength: 12)
 
             ControlButton(systemName: "square.and.arrow.up", isActive: false, action: exportCurrentContent)
                 .help("导出文本")
@@ -696,10 +715,9 @@ private struct PanelFrostedBackground: View {
 private struct LiquidGlassCollapsedBubble: View {
     var body: some View {
         GlassEffectContainer {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
+            Image(systemName: "note.text")
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.95))
                 .frame(width: 36, height: 36)
                 .padding(6)
         }
@@ -730,10 +748,9 @@ private struct LegacyCollapsedBubble: View {
                 .background(.regularMaterial, in: Circle())
                 .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
 
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(Color.white.opacity(0.95), Color.accentColor)
+            Image(systemName: "note.text")
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.95))
                 .frame(width: 36, height: 36)
                 .padding(6)
         }
@@ -773,6 +790,7 @@ private struct ClipboardHistoryRow: View {
     var onCopy: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
     @State private var isHovering = false
+    @State private var isExpanded = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -781,7 +799,7 @@ private struct ClipboardHistoryRow: View {
             Text(text)
                 .font(.system(.body, design: .rounded))
                 .foregroundStyle(.primary)
-                .lineLimit(2)
+                .lineLimit(isExpanded ? nil : 2)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 12)
@@ -815,6 +833,19 @@ private struct ClipboardHistoryRow: View {
                 .accessibilityLabel("删除条目")
                 .opacity(isHovering ? 1 : 0)
                 .offset(x: -2, y: -2)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if isHovering {
+                Button(action: { withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() } }) {
+                    Image(systemName: isExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .frame(width: 22, height: 22)
+                        .background { Circle().fill(Color.black.opacity(0.28)) }
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 8)
             }
         }
         .animation(.easeInOut(duration: 0.15), value: isHovering)
@@ -976,7 +1007,7 @@ private struct NoticeInputRow: View {
                 .foregroundStyle(Color.accentColor)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
 
-            TextField("输入公告内容，按回车添加", text: $text)
+            TextField("输入便签内容，按回车添加", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(.body, design: .rounded))
                 .onSubmit {
@@ -1057,6 +1088,8 @@ private struct AnyShape: Shape {
     }
 }
 
+// （已移除测量逻辑的 PreferenceKey）
+
 /// 捕获宿主 NSWindow，用于窗口配置。
 private struct WindowAccessor: NSViewRepresentable {
     @Binding var window: NSWindow?
@@ -1079,4 +1112,48 @@ private struct WindowAccessor: NSViewRepresentable {
 #Preview {
     ContentView()
         .frame(width: 420, height: 360)
+}
+
+// MARK: - 设置面板
+private struct SettingsSheet: View {
+    @Binding var maxHistoryEntries: Int
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("设置")
+                .font(.title3)
+                .bold()
+
+            HStack(spacing: 8) {
+                Text("历史记录最大条数：")
+                TextField("", value: $maxHistoryEntries, formatter: numberFormatter)
+                    .frame(width: 64)
+                    .textFieldStyle(.roundedBorder)
+                Stepper("", value: $maxHistoryEntries, in: 1...999, step: 1)
+                    .labelsHidden()
+                Spacer()
+            }
+
+            Text("范围 1–999。超过该数量时会自动从尾部截断。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+    }
+
+    private var numberFormatter: NumberFormatter {
+        let nf = NumberFormatter()
+        nf.minimum = 1
+        nf.maximum = 999
+        nf.allowsFloats = false
+        nf.numberStyle = .none
+        return nf
+    }
 }
